@@ -21,6 +21,31 @@
 
 ---
 
+## [0.2.0] - 2026-07-07
+
+The core release. pretty-lang becomes a working, language-agnostic pretty-printer: a `Doc` layout algebra and a linear-time renderer that reflows any syntax tree to a target width.
+
+### Added
+
+- `Doc` — the reference-counted, cheaply-clonable layout document.
+- Constructors: `Doc::nil`, `Doc::text`, `Doc::concat`, `Doc::join`.
+- Flexible line breaks: `Doc::line`, `Doc::softline`, `Doc::hardline`.
+- Combinators: `Doc::append`, `Doc::nest`, `Doc::group`.
+- Rendering: `Doc::render` (to `String`), `Doc::render_into` (any `core::fmt::Write`), and `Doc::render_writer` (any `std::io::Write`, behind the `std` feature).
+- Trait impls on `Doc`: `Clone`, `Default`, `Debug` (structural, iterative), `From<&'static str>`, `From<String>`, and an iterative `Drop` that dismantles deep documents without overflowing the stack.
+- Wadler/Lindig layout engine: single linear render pass with width-bounded look-ahead, both driven by heap work stacks so deep documents neither render nor drop recursively.
+- Property tests (`tests/proptests.rs`): flat-layout oracle, panic-safety at every width, `append` associativity, and `group` idempotence.
+- Criterion benchmarks (`benches/bench.rs`): JSON-tree and function-call workloads, flat and broken.
+- Runnable examples: `quick_start`, `json`, `rust_signature`.
+- `docs/API.md` — full public-API reference with per-item examples.
+
+### Changed
+
+- Removed the unused `serde` feature and dependency from the scaffold: a layout document has no serialization use case. The only feature is now `std` (default), which gates the `io::Write` renderer.
+- Fixed the scaffold `Cargo.toml` keyword/category arrays (were unquoted, so the manifest did not parse) and aligned `clippy.toml` `msrv` to the declared 1.85.
+
+---
+
 ## [0.1.0] - 2026-06-18
 
 Initial scaffold and repository bootstrap. No domain logic yet &mdash; this release establishes the structure, tooling, and quality gates the implementation will be built on.
@@ -34,5 +59,6 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/pretty-lang/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jamesgober/pretty-lang/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jamesgober/pretty-lang/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/pretty-lang/releases/tag/v0.1.0

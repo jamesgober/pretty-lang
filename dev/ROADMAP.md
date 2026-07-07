@@ -9,12 +9,16 @@
 Compiles, CI green, structure correct, no domain logic.
 - [x] Manifest, README, CHANGELOG, REPS, dual license, CI, deny, clippy, rustfmt.
 
-## v0.2.0 - Core (THE HARD PART, NOT DEFERRED)
+## v0.2.0 - Core (THE HARD PART, NOT DEFERRED) (DONE)
 AST/CST-to-source rendering - a gofmt-style formatter for every language nearly free.
-Dependencies (wires ast or syntax) are wired here, when first used.
+Shipped as a self-contained `Doc` layout algebra + linear-time renderer. No AST
+or syntax dependency was wired: the `Doc` combinators are the reusable interface,
+and a formatter builds a `Doc` from its own tree, so nothing in ast-lang/syntax
+is needed at this tier. Wiring stays available for a later phase if a concrete
+AST adapter is added.
 Exit criteria:
-- [ ] Every public item has rustdoc + a runnable example.
-- [ ] Core invariants property-tested (full DIRECTIVES + API authored at this stage).
+- [x] Every public item has rustdoc + a runnable example.
+- [x] Core invariants property-tested (full API authored + documented at this stage).
 
 ## v1.0.0 - API freeze
 Public surface stable and frozen until 2.0.

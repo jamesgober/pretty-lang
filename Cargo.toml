@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "pretty-lang"
-version = "0.1.0"
+version = "0.2.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -19,10 +19,10 @@ readme = "README.md"
 description = "AST/CST to source pretty-printer and formatter core."
 
 # Keywords (5 max)
-keywords = [compiler,language,formatter,pretty]
+keywords = ["compiler", "language", "formatter", "pretty", "pretty-print"]
 
 # Categories
-categories = [development-tools,development-tools::build-utils]
+categories = ["development-tools", "development-tools::build-utils"]
 
 # Links
 homepage      = "https://github.com/jamesgober/pretty-lang"
@@ -45,15 +45,14 @@ path = "src/lib.rs"
 # #################################
 [features]
 default = ["std"]
+# `std` adds the `io::Write` renderer (`Doc::render_writer`). The crate core is
+# `no_std` + `alloc`; disable default features to build without std.
 std = []
-# Serialization support.
-serde = ["dep:serde"]
 
 
 # DEPENDENCIES
 # #################################
 [dependencies]
-serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
 
 
 # DEV DEPENDENCIES
@@ -61,9 +60,6 @@ serde = { version = "1", optional = true, default-features = false, features = [
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest  = "1"
-
-[target.'cfg(loom)'.dev-dependencies]
-loom = "0.7"
 
 
 # BENCHMARKS
