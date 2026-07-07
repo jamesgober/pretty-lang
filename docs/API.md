@@ -19,15 +19,15 @@ A language-agnostic pretty-printer. The entire public surface is one type —
 render methods. You build a `Doc` from any syntax tree and render it against a
 target width; the engine chooses where the lines break.
 
-- **Version:** 0.2.0
+- **Version:** 1.0.0
 - **MSRV:** Rust 1.85 (2024 edition)
 - **`no_std`:** yes (needs `alloc`; the `std` feature adds the `io::Write` renderer)
 - **Unsafe:** none — `#![forbid(unsafe_code)]`
-- **Stability:** pre-1.0. The surface below is being designed across the 0.x
-  series and frozen at 1.0.0.
+- **Stability:** stable — the surface below is frozen (see [Stability](#stability)).
 
 ## Table of Contents
 
+- **[Stability](#stability)**
 - **[Installation](#installation)**
 - **[Quick Start](#quick-start)**
 - **[Mental model](#mental-model)**
@@ -60,14 +60,42 @@ target width; the engine chooses where the lines break.
 
 <br>
 
+## Stability
+
+As of **1.0.0** the public API documented here is **stable and frozen**. The
+crate follows [Semantic Versioning](https://semver.org):
+
+- Nothing in the frozen surface — the [`Doc`](#doc) type, its constructors
+  ([`nil`](#nil), [`text`](#text), [`concat`](#concat), [`join`](#join)), line
+  breaks ([`line`](#line), [`softline`](#softline), [`hardline`](#hardline)),
+  combinators ([`append`](#append), [`nest`](#nest), [`group`](#group)), render
+  methods ([`render`](#render), [`render_into`](#render_into),
+  [`render_writer`](#render_writer)), the [trait
+  implementations](#trait-implementations), and the `std` feature flag — will be
+  removed or changed in a breaking way within the `1.x` series. A breaking change
+  means a new major version.
+- `1.x` releases may **add** to the surface (new combinators, new render sinks,
+  new trait impls) without breaking existing code.
+- The **rendered output** of a given document at a given width is part of the
+  contract: a `1.x` release will not change the layout an existing document
+  produces, except to fix a documented bug. New layout behaviour arrives through
+  new combinators, not by re-interpreting old ones.
+- The internal node representation behind `Doc` is not part of the surface; it
+  stays private and may change freely.
+
+MSRV (Rust 1.85) is treated as a compatibility surface: a raise is a minor,
+documented change, never a patch.
+
+<br>
+
 ## Installation
 
 ```toml
 [dependencies]
-pretty-lang = "0.2"
+pretty-lang = "1"
 
 # no_std (drops the io::Write renderer):
-pretty-lang = { version = "0.2", default-features = false }
+pretty-lang = { version = "1", default-features = false }
 ```
 
 <br>

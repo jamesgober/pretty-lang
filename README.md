@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: pre-1.0, in active development.</strong> The public API is being designed across the 0.x series and frozen at <code>1.0.0</code>. See <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
+        <strong>Status: stable.</strong> As of <code>1.0.0</code> the public API is frozen under Semantic Versioning; see <a href="./docs/API.md#stability"><code>docs/API.md</code></a> for the promise and <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a> for the history.
     </blockquote>
 </div>
 
@@ -82,10 +82,10 @@ Numbers vary by CPU and environment; run the suite on your target to establish a
 
 ```toml
 [dependencies]
-pretty-lang = "0.2"
+pretty-lang = "1"
 
 # no_std (drops the io::Write renderer):
-pretty-lang = { version = "0.2", default-features = false }
+pretty-lang = { version = "1", default-features = false }
 ```
 
 **MSRV is 1.85+** (Rust 2024 edition).

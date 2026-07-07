@@ -68,6 +68,16 @@
 //! The crate is `no_std` and needs only `alloc`. The default `std` feature adds
 //! the [`Doc::render_writer`] I/O sink. There is no `unsafe` anywhere
 //! (`#![forbid(unsafe_code)]`).
+//!
+//! ## Stability
+//!
+//! As of `1.0.0` the public surface — the [`Doc`] type, its constructors,
+//! combinators, render methods, and trait implementations, together with the
+//! `std` feature flag — is stable and frozen under [Semantic Versioning]. It
+//! will not change in a breaking way within the `1.x` series; `1.x` releases may
+//! only add. See `docs/API.md` for the full promise.
+//!
+//! [Semantic Versioning]: https://semver.org
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]

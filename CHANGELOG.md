@@ -21,6 +21,16 @@
 
 ---
 
+## [1.0.0] - 2026-07-07
+
+API freeze. The public surface delivered in 0.2.0 is now stable and frozen under Semantic Versioning; it will not change in a breaking way within the `1.x` series. No functional changes from 0.2.0 — this release records the promise.
+
+### Changed
+
+- Marked the public API stable and frozen. `docs/API.md` carries the SemVer promise, per-item; the crate-level docs and README record the same.
+
+---
+
 ## [0.2.0] - 2026-07-07
 
 The core release. pretty-lang becomes a working, language-agnostic pretty-printer: a `Doc` layout algebra and a linear-time renderer that reflows any syntax tree to a target width.
@@ -59,6 +69,7 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/pretty-lang/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jamesgober/pretty-lang/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jamesgober/pretty-lang/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/jamesgober/pretty-lang/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/pretty-lang/releases/tag/v0.1.0
