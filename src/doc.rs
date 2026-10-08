@@ -51,7 +51,8 @@ pub struct Doc(pub(crate) Rc<Node>);
 pub(crate) enum Node {
     /// The empty document. Renders to nothing.
     Nil,
-    /// Literal text with its precomputed display width (in Unicode scalars).
+    /// Literal text with its precomputed width, counted as
+    /// `str::chars().count()` (Unicode scalar values).
     /// The text MUST NOT contain a newline; use [`Doc::hardline`] for those.
     Text(Cow<'static, str>, usize),
     /// A space when the enclosing group is flat, a newline when it is broken.
@@ -60,13 +61,105 @@ pub(crate) enum Node {
     SoftLine,
     /// Always a newline; forces every enclosing group to break.
     HardLine,
-    /// Concatenation of two documents, laid out left then right.
-    Cat(Doc, Doc),
-    /// Adds `isize` columns of indentation to line breaks inside `Doc`.
-    Nest(isize, Doc),
+    /// Concatenation of two documents, laid out left then right, with the
+    /// pair's combined [`Fit`] summary.
+    Cat(Doc, Doc, Fit),
+    /// Adds `isize` columns of indentation to line breaks inside `Doc`. The
+    /// [`Fit`] is the child's (indentation never affects a fit decision).
+    Nest(isize, Doc, Fit),
     /// A layout choice point: render the inside flat if it fits the remaining
     /// width on the current line, otherwise break every flexible line in it.
-    Group(Doc),
+    /// The `usize` is the inside's flat width ([`Fit::flat`]).
+    Group(Doc, usize),
+}
+
+/// Width standing for "wider than any target": the flat width of a hardline,
+/// and the value every width sum saturates at.
+///
+/// The renderer clamps its target width to `isize::MAX`, which is strictly
+/// below this, so a saturated or hardline-bearing width never fits. Treating
+/// "contains a hardline in flat mode" as infinitely wide is exact: a flat
+/// hardline makes the look-ahead fail no matter what surrounds it, and so does
+/// an infinite width.
+pub(crate) const INF: usize = usize::MAX;
+
+/// Sentinel for [`Fit::brk`]: in break mode the node ends no line itself.
+///
+/// It shares its value with [`INF`] on purpose. A node whose break-mode
+/// prefix saturated to `INF` also has `flat == INF` (the prefix is part of
+/// the flat form, measured identically), and an `INF` width never fits
+/// whether or not a line break follows it, so the two readings agree.
+pub(crate) const NO_BREAK: usize = usize::MAX;
+
+/// Look-ahead summary of a subtree, computed once when the node is built.
+///
+/// The renderer's fit test asks: laid out from here, how many columns are
+/// used before the current line ends? For a subtree that answer depends only
+/// on the mode it is laid out in, so it is cached here and composed in O(1)
+/// per node. This is what makes the fit test constant-time instead of a scan
+/// over the rest of the line, which was quadratic on zero-width content
+/// (ISSUES M65). Indentation is not tracked because it never affects a fit:
+/// the look-ahead only counts columns up to the first line break.
+#[derive(Clone, Copy)]
+pub(crate) struct Fit {
+    /// Columns used when the subtree is laid out flat: text widths, one per
+    /// `line`, zero per `softline`, and [`INF`] if it contains a hardline.
+    /// Saturates at [`INF`].
+    pub(crate) flat: usize,
+    /// Columns used in break mode before the first line break the subtree
+    /// itself owns (a `line`, `softline`, or `hardline` not inside a nested
+    /// group), or [`NO_BREAK`] if it owns none. Nested groups count as flat.
+    /// Whenever this is a real width, it is `<= flat`.
+    pub(crate) brk: usize,
+}
+
+impl Fit {
+    /// Summary of a sequence: `a` laid out, then `b`.
+    #[inline]
+    const fn cat(a: Fit, b: Fit) -> Fit {
+        let brk = if a.brk != NO_BREAK {
+            // `a` ends the line itself; nothing in `b` is reached.
+            a.brk
+        } else if b.brk != NO_BREAK {
+            // In break mode `a` passed through unchanged, so it was laid out
+            // exactly as in flat mode.
+            a.flat.saturating_add(b.brk)
+        } else {
+            NO_BREAK
+        };
+        Fit {
+            flat: a.flat.saturating_add(b.flat),
+            brk,
+        }
+    }
+}
+
+impl Node {
+    /// This node's look-ahead summary, in O(1): leaves are constants and
+    /// internal nodes carry theirs.
+    #[inline]
+    pub(crate) fn fit(&self) -> Fit {
+        match self {
+            Node::Nil => Fit {
+                flat: 0,
+                brk: NO_BREAK,
+            },
+            Node::Text(_, w) => Fit {
+                flat: *w,
+                brk: NO_BREAK,
+            },
+            Node::Line => Fit { flat: 1, brk: 0 },
+            Node::SoftLine => Fit { flat: 0, brk: 0 },
+            Node::HardLine => Fit { flat: INF, brk: 0 },
+            Node::Cat(_, _, fit) | Node::Nest(_, _, fit) => *fit,
+            // A group seen from outside is always measured flat: the
+            // look-ahead assumes nested groups stay flat (Wadler's rule).
+            Node::Group(_, flat) => Fit {
+                flat: *flat,
+                brk: NO_BREAK,
+            },
+        }
+    }
 }
 
 impl Doc {
@@ -91,8 +184,12 @@ impl Doc {
     ///
     /// The argument is anything that converts into a `Cow<'static, str>`, so a
     /// string literal is stored without allocating and an owned `String` is
-    /// moved in. The display width is measured once, here, as the number of
-    /// Unicode scalar values.
+    /// moved in. The width is measured once, here, as `s.chars().count()`: the
+    /// number of Unicode scalar values. It is not the byte length and not the
+    /// terminal display width: a CJK character or an emoji (two cells in a
+    /// terminal) counts as one, a combining mark (zero cells) counts as one,
+    /// and a tab counts as one. If you need display-accurate layout, measure
+    /// and pad your text yourself.
     ///
     /// # Panics
     ///
@@ -201,7 +298,8 @@ impl Doc {
     #[inline]
     #[must_use]
     pub fn append(self, other: Doc) -> Doc {
-        Doc(Rc::new(Node::Cat(self, other)))
+        let fit = Fit::cat(self.0.fit(), other.0.fit());
+        Doc(Rc::new(Node::Cat(self, other, fit)))
     }
 
     /// Increase the indentation applied to every line break *inside* `self` by
@@ -235,7 +333,8 @@ impl Doc {
     #[inline]
     #[must_use]
     pub fn nest(self, indent: isize) -> Doc {
-        Doc(Rc::new(Node::Nest(indent, self)))
+        let fit = self.0.fit();
+        Doc(Rc::new(Node::Nest(indent, self, fit)))
     }
 
     /// Mark `self` as a layout choice point.
@@ -279,7 +378,8 @@ impl Doc {
     #[inline]
     #[must_use]
     pub fn group(self) -> Doc {
-        Doc(Rc::new(Node::Group(self)))
+        let flat = self.0.fit().flat;
+        Doc(Rc::new(Node::Group(self, flat)))
     }
 
     /// Concatenate every document produced by `docs`, in order. Returns
@@ -352,10 +452,20 @@ impl Doc {
     /// Render this document to an owned [`String`], choosing line breaks so that
     /// no line exceeds `width` columns where the document allows a choice.
     ///
-    /// `width` is the target line length in Unicode scalars. Lines can still
-    /// exceed it when a single unbreakable [`text`](Doc::text) is wider than
-    /// `width`, or where the document offers no break — the renderer never
-    /// invents break points that were not described.
+    /// `width` is the target line length in `char`s, counted the same way as
+    /// [`text`](Doc::text) widths (`chars().count()`, so not display cells).
+    /// Lines can still exceed it when a single unbreakable
+    /// [`text`](Doc::text) is wider than `width`, or where the document offers
+    /// no break — the renderer never invents break points that were not
+    /// described.
+    ///
+    /// Every width at or above `isize::MAX` is "unlimited" and behaves exactly
+    /// like `isize::MAX`, so `usize::MAX` is a safe way to ask for the
+    /// widest layout. (Before 1.0.1, widths above `isize::MAX` wrapped to a
+    /// negative width and broke every group.)
+    ///
+    /// Rendering takes time linear in the size of the document, whatever the
+    /// width.
     ///
     /// # Examples
     ///
@@ -365,6 +475,9 @@ impl Doc {
     /// let doc = Doc::text("a").append(Doc::line()).append(Doc::text("b")).group();
     /// assert_eq!(doc.render(80), "a b");
     /// assert_eq!(doc.render(1), "a\nb");
+    ///
+    /// // Unlimited width: every group that can be flat is flat.
+    /// assert_eq!(doc.render(usize::MAX), "a b");
     /// ```
     #[must_use]
     pub fn render(&self, width: usize) -> String {
@@ -377,7 +490,9 @@ impl Doc {
     /// Render this document into any [`core::fmt::Write`] sink, choosing line
     /// breaks for the target `width`. Use this to stream directly into a caller
     /// -owned buffer and avoid the intermediate [`String`] that
-    /// [`render`](Doc::render) allocates.
+    /// [`render`](Doc::render) allocates. `width` means exactly what it means
+    /// for [`render`](Doc::render) (counted in `char`s; `isize::MAX` and above
+    /// is unlimited), and the output is identical.
     ///
     /// # Errors
     ///
@@ -401,7 +516,9 @@ impl Doc {
 
     /// Render this document into a [`std::io::Write`] sink, choosing line breaks
     /// for the target `width`. This is the streaming counterpart to
-    /// [`render`](Doc::render) for files, sockets, and stdout.
+    /// [`render`](Doc::render) for files, sockets, and stdout. `width` means
+    /// exactly what it means for [`render`](Doc::render), and the bytes written
+    /// are the UTF-8 of the string `render` would return.
     ///
     /// # Errors
     ///
@@ -492,11 +609,11 @@ impl Drop for Doc {
 fn take_children(rc: &mut Rc<Node>, nil: &Rc<Node>, stack: &mut Vec<Rc<Node>>) {
     let Some(node) = Rc::get_mut(rc) else { return };
     match node {
-        Node::Cat(a, b) => {
+        Node::Cat(a, b, _) => {
             stack.push(core::mem::replace(&mut a.0, nil.clone()));
             stack.push(core::mem::replace(&mut b.0, nil.clone()));
         }
-        Node::Nest(_, x) | Node::Group(x) => {
+        Node::Nest(_, x, _) | Node::Group(x, _) => {
             stack.push(core::mem::replace(&mut x.0, nil.clone()));
         }
         Node::Nil | Node::Text(..) | Node::Line | Node::SoftLine | Node::HardLine => {}
@@ -521,19 +638,19 @@ impl core::fmt::Debug for Doc {
                     Node::Line => f.write_str("Line")?,
                     Node::SoftLine => f.write_str("SoftLine")?,
                     Node::HardLine => f.write_str("HardLine")?,
-                    Node::Cat(a, b) => {
+                    Node::Cat(a, b, _) => {
                         f.write_str("Cat(")?;
                         stack.push(Step::Str(")"));
                         stack.push(Step::Node(b.clone()));
                         stack.push(Step::Str(", "));
                         stack.push(Step::Node(a.clone()));
                     }
-                    Node::Nest(i, x) => {
+                    Node::Nest(i, x, _) => {
                         write!(f, "Nest({i}, ")?;
                         stack.push(Step::Str(")"));
                         stack.push(Step::Node(x.clone()));
                     }
-                    Node::Group(x) => {
+                    Node::Group(x, _) => {
                         f.write_str("Group(")?;
                         stack.push(Step::Str(")"));
                         stack.push(Step::Node(x.clone()));
@@ -542,5 +659,67 @@ impl core::fmt::Debug for Doc {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Doc, INF, NO_BREAK};
+
+    #[test]
+    fn test_fit_leaves() {
+        assert_eq!(Doc::nil().0.fit().flat, 0);
+        assert_eq!(Doc::text("ab").0.fit().flat, 2);
+        assert_eq!(Doc::text("ab").0.fit().brk, NO_BREAK);
+        assert_eq!(Doc::line().0.fit().flat, 1);
+        assert_eq!(Doc::line().0.fit().brk, 0);
+        assert_eq!(Doc::softline().0.fit().flat, 0);
+        assert_eq!(Doc::hardline().0.fit().flat, INF);
+        assert_eq!(Doc::hardline().0.fit().brk, 0);
+    }
+
+    #[test]
+    fn test_fit_cat_stops_at_first_owned_break() {
+        let doc = Doc::text("abc")
+            .append(Doc::line())
+            .append(Doc::text("defgh"));
+        let fit = doc.0.fit();
+        assert_eq!(fit.flat, 9);
+        assert_eq!(fit.brk, 3);
+    }
+
+    #[test]
+    fn test_fit_group_hides_breaks_from_break_mode() {
+        // Seen from outside, a group is measured flat and owns no break.
+        let inner = Doc::text("a").append(Doc::line()).append(Doc::text("b"));
+        let fit = inner.clone().group().append(Doc::text("c")).0.fit();
+        assert_eq!(fit.flat, 4);
+        assert_eq!(fit.brk, NO_BREAK);
+        // Nest is transparent.
+        let nested = inner.nest(4).0.fit();
+        assert_eq!((nested.flat, nested.brk), (3, 1));
+    }
+
+    #[test]
+    fn test_fit_hardline_in_group_is_infinitely_wide() {
+        let fit = Doc::text("a").append(Doc::hardline()).group().0.fit();
+        assert_eq!(fit.flat, INF);
+    }
+
+    #[test]
+    fn test_fit_saturates_on_shared_blowup() {
+        // Sharing makes the tree 2^70 leaves wide while the DAG stays tiny;
+        // the width must saturate at INF instead of wrapping.
+        let mut doc = Doc::text("x");
+        for _ in 0..70 {
+            doc = doc.clone().append(doc);
+        }
+        let fit = doc.0.fit();
+        assert_eq!(fit.flat, INF);
+        assert_eq!(fit.brk, NO_BREAK);
+        let with_break = doc.append(Doc::line()).0.fit();
+        assert_eq!(with_break.flat, INF);
+        // The break-mode prefix saturated too; INF is the shared encoding.
+        assert_eq!(with_break.brk, INF);
     }
 }

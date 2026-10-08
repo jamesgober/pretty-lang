@@ -19,7 +19,7 @@ A language-agnostic pretty-printer. The entire public surface is one type —
 render methods. You build a `Doc` from any syntax tree and render it against a
 target width; the engine chooses where the lines break.
 
-- **Version:** 1.0.0
+- **Version:** 1.0.1
 - **MSRV:** Rust 1.85 (2024 edition)
 - **`no_std`:** yes (needs `alloc`; the `std` feature adds the `io::Write` renderer)
 - **Unsafe:** none — `#![forbid(unsafe_code)]`
@@ -54,8 +54,8 @@ target width; the engine chooses where the lines break.
 - **[Feature flags](#feature-flags)**
 - **[Recipes](#recipes)**
 - **[Design notes](#design-notes)**
-  - [Why the width fits are linear](#why-linear)
-  - [Text width is measured in Unicode scalars](#text-width)
+  - [Why rendering is linear](#why-linear)
+  - [Widths are counted in `char`s](#text-width)
   - [Single-threaded by design](#single-threaded)
 
 <br>
@@ -206,8 +206,9 @@ A literal, unbreakable piece of text.
 
 - `s` — anything convertible into `Cow<'static, str>`. A string literal
   (`&'static str`) is stored without allocating; an owned `String` is moved in.
-  The display width is measured once, here, as the number of Unicode scalar
-  values (see [Text width](#text-width)).
+  The width is measured once, here, as `s.chars().count()` (Unicode scalar
+  values; not bytes and not terminal display cells, see
+  [Widths](#text-width)).
 
 **Returns:** a `Doc` that renders `s` verbatim.
 
@@ -500,11 +501,17 @@ columns where the document allows a choice.
 
 - `self` — the document (borrowed; rendering does not consume it, so one `Doc`
   can be rendered at several widths).
-- `width` — the target line length, in Unicode scalars.
+- `width` — the target line length, counted in `char`s like every other width
+  (see [Widths](#text-width)). Any width at or above `isize::MAX` is unlimited
+  and behaves exactly like `isize::MAX`, so `usize::MAX` asks for the widest
+  layout. (Before 1.0.1 a width above `isize::MAX` wrapped negative and broke
+  every group; see the CHANGELOG.)
 
 **Returns:** the laid-out text. Lines can still exceed `width` where a single
 unbreakable [`text`](#text) is wider than `width`, or where the document offers
 no break — the renderer never invents break points that were not described.
+Rendering takes time linear in the size of the document, at any width (see
+[Why rendering is linear](#why-linear)).
 
 ```rust
 use pretty_lang::Doc;
@@ -512,6 +519,7 @@ use pretty_lang::Doc;
 let doc = Doc::text("a").append(Doc::line()).append(Doc::text("b")).group();
 assert_eq!(doc.render(80), "a b");
 assert_eq!(doc.render(1), "a\nb");
+assert_eq!(doc.render(usize::MAX), "a b"); // unlimited width
 ```
 
 <br>
@@ -664,25 +672,54 @@ doc.render_writer(80, &mut std::io::stdout())?;
 
 ## Design notes
 
-<h3 id="why-linear">Why the width fits are linear</h3>
+<h3 id="why-linear">Why rendering is linear</h3>
 
-At each [`group`](#group) the renderer runs a look-ahead — *does the flat form
-fit the width left on this line?* — that stops the moment the answer is known:
-the width is exhausted, or a newline is reached. Because it never scans past the
-end of the current line, the total work across all groups is proportional to the
-document size, not quadratic. Both the render pass and the look-ahead use heap
-work stacks rather than recursion, so neither the depth nor the breadth of a
-document can overflow the call stack.
+At each [`group`](#group) the renderer asks *does the flat form, plus whatever
+follows it on the same line, fit the width left on this line?* Since 1.0.1 that
+question is answered in O(1). Every node records, when it is built, how many
+columns it uses laid out flat and how many it uses in broken form before its
+first line break; every entry on the renderer's work stack records how many
+columns it and everything queued after it use before the line ends. A group
+fits exactly when its flat width plus that running total is within the columns
+left. Rendering is therefore a single pass, linear in the size of the document,
+with no look-ahead scan and no allocation beyond the work stack (and, for
+`render`, the output `String`).
 
-<h3 id="text-width">Text width is measured in Unicode scalars</h3>
+Before 1.0.1 the question was answered by scanning forward until the width ran
+out or a line break was reached. That is bounded for ordinary text, but
+zero-width content (`nil`, empty `text`, flat `softline`s, nested groups) never
+uses up the width, so a document made of many of them made the scan quadratic:
+about 50 seconds to render 100,000 `softline` groups. The layout decisions are
+unchanged (a property test checks the two algorithms against each other on
+random documents); only the cost is.
 
-[`text`](#text) measures width as `chars().count()` — the number of Unicode
-scalar values — not bytes and not grapheme clusters. For source code this is the
-right, cheap default: `"café"` is four columns wide, matching how it displays in
-a fixed-width editor, even though it is five bytes. Combining marks and East
-Asian wide characters are counted as one column each; if you need
-terminal-accurate width for CJK or emoji, pre-measure and pad your `text` nodes
-yourself.
+The render pass uses a heap work stack rather than recursion, and so do `Drop`
+and `Debug`, so neither the depth nor the breadth of a document can overflow
+the call stack.
+
+<h3 id="text-width">Widths are counted in <code>char</code>s</h3>
+
+Every width in the crate is a count of Unicode scalar values (`char`s):
+
+- [`text`](#text) is `s.chars().count()` columns wide, measured once when it is
+  built.
+- A flat [`line`](#line) is one column; a flat [`softline`](#softline) is zero.
+- Each space of indentation after a broken line is one column.
+- The `width` passed to [`render`](#render), [`render_into`](#render_into), and
+  [`render_writer`](#render_writer) is measured the same way. Any value at or
+  above `isize::MAX` is unlimited.
+
+This is not the byte length and not the terminal display width. `"café"` is
+four columns (five bytes), which matches how it displays in a fixed-width
+editor. But a CJK character or an emoji, which a terminal draws two cells wide,
+counts as one; a combining mark, which a terminal draws zero cells wide, counts
+as one; a tab counts as one; and a grapheme cluster of several scalars counts as
+several. If you need terminal-accurate layout for such text, measure and pad
+your `text` nodes yourself.
+
+The 1.x series keeps this rule, because changing how width is measured changes
+the layout existing documents produce. Display-width measurement is planned as
+an opt-in addition or for 2.0 (see `dev/ROADMAP.md`).
 
 <h3 id="single-threaded">Single-threaded by design</h3>
 

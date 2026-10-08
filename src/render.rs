@@ -1,22 +1,34 @@
 //! The layout engine: turn a [`Doc`] tree into laid-out text for a target
 //! width.
 //!
-//! The algorithm is Wadler/Lindig's linear-time pretty-printer. Two passes
-//! cooperate:
+//! The algorithm is Wadler/Lindig's pretty-printer: [`layout`] walks the
+//! document with an explicit work stack, emitting text and resolving each
+//! [`group`](crate::Doc::group) to *flat* or *broken*. A group is flat when its
+//! contents, laid out flat, plus whatever follows on the same line, fit in the
+//! columns left on the current line.
 //!
-//! * [`layout`] walks the document with an explicit work stack, emitting text
-//!   and resolving each [`group`](crate::Doc::group) to *flat* or *broken*.
-//! * [`fits`] is the bounded look-ahead that answers "does the rest of this line
-//!   fit?" — it scans only as far as the first newline or the first column past
-//!   `width`, which is what keeps the whole thing linear.
+//! That fit test is O(1). Every node carries a [`Fit`] summary computed when it
+//! was built, and every frame on the work stack carries `rest`: the columns
+//! that frame and everything queued after it will use before the current line
+//! ends. A group fits exactly when its flat width plus the `rest` of the frame
+//! below it is within the columns left. Rendering is therefore one linear pass
+//! with no look-ahead scan at all.
 //!
-//! Neither pass recurses on the document, so arbitrarily deep documents render
-//! without risking a stack overflow.
+//! The decisions are identical to the classic bounded scan (which walked the
+//! continuation until a line break or until the width ran out). That scan was
+//! quadratic whenever the continuation was zero-width, because nothing ever
+//! exhausted the width (ISSUES M65); the summaries compute the same answer
+//! without walking. `tests/equivalence.rs` checks the two against each other
+//! on random documents.
+//!
+//! Nothing here recurses on the document, so arbitrarily deep documents render
+//! without risking a stack overflow, and the render path allocates only the
+//! work stack.
 
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use crate::doc::{Doc, Node};
+use crate::doc::{Doc, Fit, NO_BREAK, Node};
 
 /// Whether a group is being laid out on one line (`Flat`) or broken across
 /// several (`Break`).
@@ -26,12 +38,55 @@ enum Mode {
     Break,
 }
 
-/// One pending piece of work: render `doc` at indentation `indent` in `mode`.
+/// One pending piece of work: render `node` at indentation `indent` in `mode`.
 /// The engine borrows nodes rather than cloning `Doc` handles on the hot path.
 struct Frame<'a> {
     indent: isize,
     mode: Mode,
     node: &'a Node,
+    /// Columns used from the start of this frame, through every frame below
+    /// it on the stack (which are laid out after it), up to the first line
+    /// break that ends the current line, or to the end of the document.
+    /// Saturates at [`crate::doc::INF`], which never fits.
+    rest: usize,
+}
+
+/// Columns a node laid out in `mode` uses before the line ends, given that
+/// `below` columns follow it up to the line's end.
+#[inline]
+fn rest_width(fit: Fit, mode: Mode, below: usize) -> usize {
+    match mode {
+        // Flat mode never ends a line (a flat hardline is `INF` wide), so the
+        // following content is always reached.
+        Mode::Flat => fit.flat.saturating_add(below),
+        Mode::Break if fit.brk == NO_BREAK => fit.flat.saturating_add(below),
+        // The node ends the line itself; what follows is on a later line.
+        Mode::Break => fit.brk,
+    }
+}
+
+/// Push a frame, computing its `rest` from the frame it lands on.
+#[inline]
+fn push<'a>(stack: &mut Vec<Frame<'a>>, indent: isize, mode: Mode, node: &'a Node) {
+    let below = stack.last().map_or(0, |f| f.rest);
+    stack.push(Frame {
+        indent,
+        mode,
+        node,
+        rest: rest_width(node.fit(), mode, below),
+    });
+}
+
+/// Clamp a caller's target width into the engine's signed column space.
+///
+/// Columns are `isize` because indentation can be negative. Any width above
+/// `isize::MAX` already exceeds every reachable column count, so clamping
+/// changes nothing except that such widths no longer wrap to a negative value
+/// (ISSUES M64: `width as isize` turned `usize::MAX` into `-1`, which broke
+/// every group).
+#[inline]
+fn clamp_width(width: usize) -> isize {
+    isize::try_from(width).unwrap_or(isize::MAX)
 }
 
 /// Lay `root` out to `width` columns, writing the result into `out`.
@@ -39,44 +94,33 @@ struct Frame<'a> {
 /// Returns `out`'s error unchanged if it ever fails mid-write; against an
 /// infallible sink (such as `String`) it always returns `Ok`.
 pub(crate) fn layout<W: Write>(root: &Doc, width: usize, out: &mut W) -> core::fmt::Result {
-    let width = width as isize;
+    let width = clamp_width(width);
     // Current column, i.e. how many columns of the current line are used.
+    // Never negative: it starts at 0, only grows, and a newline resets it to
+    // a clamped-at-zero indentation.
     let mut col: isize = 0;
     // The work stack, processed top (last) first. The root starts in Break
     // mode: with no enclosing group, every flexible break takes its broken form
     // unless a group later flattens it.
     let mut stack: Vec<Frame<'_>> = Vec::with_capacity(16);
-    stack.push(Frame {
-        indent: 0,
-        mode: Mode::Break,
-        node: &root.0,
-    });
+    push(&mut stack, 0, Mode::Break, &root.0);
 
-    while let Some(Frame { indent, mode, node }) = stack.pop() {
+    while let Some(Frame {
+        indent, mode, node, ..
+    }) = stack.pop()
+    {
         match node {
             Node::Nil => {}
             Node::Text(s, w) => {
                 out.write_str(s)?;
-                col = col.saturating_add(*w as isize);
+                col = col.saturating_add(isize::try_from(*w).unwrap_or(isize::MAX));
             }
-            Node::Cat(a, b) => {
+            Node::Cat(a, b, _) => {
                 // Push right first so the left child is processed next.
-                stack.push(Frame {
-                    indent,
-                    mode,
-                    node: &b.0,
-                });
-                stack.push(Frame {
-                    indent,
-                    mode,
-                    node: &a.0,
-                });
+                push(&mut stack, indent, mode, &b.0);
+                push(&mut stack, indent, mode, &a.0);
             }
-            Node::Nest(j, x) => stack.push(Frame {
-                indent: indent.saturating_add(*j),
-                mode,
-                node: &x.0,
-            }),
+            Node::Nest(j, x, _) => push(&mut stack, indent.saturating_add(*j), mode, &x.0),
             Node::Line => match mode {
                 Mode::Flat => {
                     out.write_str(" ")?;
@@ -89,24 +133,43 @@ pub(crate) fn layout<W: Write>(root: &Doc, width: usize, out: &mut W) -> core::f
                 Mode::Break => col = new_line(out, indent)?,
             },
             // A hardline is always a newline. It reaches here only in Break
-            // mode, because `fits` reports any hardline as not fitting, so every
-            // enclosing group is forced to break before we get here.
+            // mode, because a hardline makes its group's flat width `INF`,
+            // which never fits, so every enclosing group breaks first.
             Node::HardLine => col = new_line(out, indent)?,
-            Node::Group(x) => {
-                let mode = if fits(width - col, indent, &x.0, &stack) {
+            Node::Group(x, flat) => {
+                // `width - col` cannot overflow: width is in [0, isize::MAX]
+                // and col is never negative.
+                let below = stack.last().map_or(0, |f| f.rest);
+                let mode = if fits(width - col, *flat, below) {
                     Mode::Flat
                 } else {
                     Mode::Break
                 };
-                stack.push(Frame {
-                    indent,
-                    mode,
-                    node: &x.0,
-                });
+                push(&mut stack, indent, mode, &x.0);
             }
         }
     }
     Ok(())
+}
+
+/// Does a group whose contents are `flat` columns wide when laid out flat fit
+/// in `avail` columns, given that `below` more columns follow it before the
+/// current line ends?
+///
+/// This is the whole look-ahead. It answers exactly what a scan of the group
+/// (flat) and then the queued continuation would: the scan stops at the first
+/// line break in a broken frame (fits if the width held out), fails on a
+/// hardline in flat context (`INF` here), and otherwise fails as soon as the
+/// running width exceeds `avail`. Widths are non-negative, so "never exceeded
+/// along the way" is the same as "the total up to the stop is within
+/// `avail`".
+#[inline]
+fn fits(avail: isize, flat: usize, below: usize) -> bool {
+    match usize::try_from(avail) {
+        Ok(avail) => flat.saturating_add(below) <= avail,
+        // The line is already over-full.
+        Err(_) => false,
+    }
 }
 
 /// Emit a newline followed by `indent` (clamped at zero) spaces, and return the
@@ -129,76 +192,6 @@ fn write_spaces<W: Write>(out: &mut W, mut n: usize) -> core::fmt::Result {
         n -= take;
     }
     Ok(())
-}
-
-/// Does the document fit flat in `avail` columns, followed by the already-queued
-/// continuation on `stack`?
-///
-/// Look-ahead stops the moment the answer is known: the width is exhausted
-/// (returns `false`) or a line-ending break is reached (returns `true`). A
-/// [`Node::HardLine`] in flat context can never fit, which is exactly how a
-/// hardline forces its enclosing groups to break. Nested groups are assumed
-/// flat here, the standard Wadler approximation that keeps the scan linear.
-fn fits(avail: isize, indent: isize, group: &Node, stack: &[Frame<'_>]) -> bool {
-    if avail < 0 {
-        return false;
-    }
-    let mut remaining = avail;
-    // A small local stack for the group's own contents, expanded flat. When it
-    // drains, we continue into the queued continuation from the top of `stack`.
-    let mut local: Vec<(isize, Mode, &Node)> = Vec::new();
-    local.push((indent, Mode::Flat, group));
-    let mut cont = stack.len();
-
-    loop {
-        let (i, mode, node) = match local.pop() {
-            Some(item) => item,
-            None => {
-                if cont == 0 {
-                    return true;
-                }
-                cont -= 1;
-                let frame = &stack[cont];
-                (frame.indent, frame.mode, frame.node)
-            }
-        };
-
-        match node {
-            Node::Nil => {}
-            Node::Text(_, w) => {
-                remaining -= *w as isize;
-                if remaining < 0 {
-                    return false;
-                }
-            }
-            Node::Cat(a, b) => {
-                local.push((i, mode, &b.0));
-                local.push((i, mode, &a.0));
-            }
-            Node::Nest(j, x) => local.push((i.saturating_add(*j), mode, &x.0)),
-            // In flat mode a `Line` is a space and a `SoftLine` is nothing; in
-            // break mode either one ends the current line, so the rest fits.
-            Node::Line => match mode {
-                Mode::Flat => {
-                    remaining -= 1;
-                    if remaining < 0 {
-                        return false;
-                    }
-                }
-                Mode::Break => return true,
-            },
-            Node::SoftLine => {
-                if mode == Mode::Break {
-                    return true;
-                }
-            }
-            Node::HardLine => match mode {
-                Mode::Flat => return false,
-                Mode::Break => return true,
-            },
-            Node::Group(x) => local.push((i, Mode::Flat, &x.0)),
-        }
-    }
 }
 
 /// `std::io::Write` counterpart of [`layout`]: render `root` at `width` into an

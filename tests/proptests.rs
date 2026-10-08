@@ -107,4 +107,51 @@ proptest! {
         let right = a.append(b.append(c)).render(width);
         prop_assert_eq!(left, right);
     }
+
+    /// M64: every width at or above the widest document is "unlimited", and
+    /// that includes the `usize` range above `isize::MAX` (which 1.0.0 wrapped
+    /// to a negative width). A grouped hardline-free document renders as its
+    /// flat oracle at each of them.
+    #[test]
+    fn prop_unlimited_widths_render_flat_oracle((doc, flat) in arb_doc_and_flat()) {
+        let doc = doc.group();
+        for width in [WIDE, isize::MAX as usize, isize::MAX as usize + 1, usize::MAX] {
+            prop_assert_eq!(doc.render(width), flat.clone());
+        }
+    }
+
+    /// With hardlines in play, `usize::MAX` still lays out exactly like any
+    /// other width wider than the document.
+    #[test]
+    fn prop_usize_max_matches_wide(doc in arb_doc()) {
+        prop_assert_eq!(doc.render(usize::MAX), doc.render(WIDE));
+    }
+
+    /// The extreme widths 0, 1 and `usize::MAX` never panic, and the three
+    /// render paths agree at each.
+    #[test]
+    fn prop_extreme_widths_agree(doc in arb_doc()) {
+        for width in [0, 1, usize::MAX] {
+            let rendered = doc.render(width);
+            let mut buf = String::new();
+            doc.render_into(width, &mut buf).unwrap();
+            prop_assert_eq!(&buf, &rendered);
+            #[cfg(feature = "std")]
+            {
+                let mut bytes: Vec<u8> = Vec::new();
+                doc.render_writer(width, &mut bytes).unwrap();
+                prop_assert_eq!(bytes, rendered.into_bytes());
+            }
+        }
+    }
+
+    /// At width 0 nothing non-empty fits, so a grouped document breaks exactly
+    /// when its flat form is non-empty or it contains a hardline: when the flat
+    /// form is empty (all `nil`, empty text, `softline`) it renders as "".
+    #[test]
+    fn prop_width_zero_keeps_empty_flat_forms((doc, flat) in arb_doc_and_flat()) {
+        if flat.is_empty() {
+            prop_assert_eq!(doc.group().render(0), "");
+        }
+    }
 }

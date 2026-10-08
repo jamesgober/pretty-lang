@@ -15,10 +15,20 @@
 //! line breaks. The same document renders compactly at width 100 and stacked at
 //! width 20, with no branching in your code.
 //!
-//! The engine is Wadler's *A Prettier Printer* in Lindig's linear-time
-//! imperative form: rendering is `O(document size)`, look-ahead is bounded by
-//! the target width, and neither pass recurses on the tree, so deeply nested
-//! documents cannot overflow the stack.
+//! The engine is Wadler's *A Prettier Printer* in Lindig's imperative form.
+//! Rendering is one `O(document size)` pass: each node carries a width summary
+//! computed when it is built, so the "does this group fit?" test is O(1) and
+//! never rescans the rest of the line. Nothing recurses on the tree, so deeply
+//! nested documents cannot overflow the stack.
+//!
+//! ## Widths
+//!
+//! Widths are counted in `char`s: a [`Doc::text`] is `str::chars().count()`
+//! columns wide (Unicode scalar values, not bytes, not grapheme clusters, not
+//! terminal display cells), a flat [`Doc::line`] is one column, and each space
+//! of indentation is one column. The `width` given to a render method is
+//! measured the same way. Any width at or above `isize::MAX` means
+//! "unlimited".
 //!
 //! ## Quick start
 //!
@@ -95,6 +105,8 @@ pub use doc::Doc;
 mod tests {
     use super::Doc;
     use alloc::string::String;
+    // Only the `std` io-sink tests collect into a byte vector.
+    #[cfg(feature = "std")]
     use alloc::vec::Vec;
 
     #[test]
@@ -283,6 +295,111 @@ mod tests {
         let out = doc.render(80);
         assert!(out.ends_with("end"));
         assert_eq!(out.len(), 100_000 + 3);
+    }
+
+    /// A grouped argument list, shaped like the crate's own flat bench.
+    fn call(n: usize) -> Doc {
+        Doc::text("call(")
+            .append(
+                Doc::softline()
+                    .append(Doc::join(
+                        Doc::text(",").append(Doc::line()),
+                        (0..n).map(|i| Doc::text(alloc::format!("arg{i}"))),
+                    ))
+                    .nest(4),
+            )
+            .append(Doc::softline())
+            .append(Doc::text(")"))
+            .group()
+    }
+
+    #[test]
+    fn test_render_usize_max_is_flat() {
+        // M64 regression: 1.0.0 computed `usize::MAX as isize == -1`, so every
+        // group broke at the "unlimited" width.
+        let doc = call(8);
+        let out = doc.render(usize::MAX);
+        assert!(!out.contains('\n'), "{out}");
+        assert_eq!(out, doc.render(1_000));
+    }
+
+    #[test]
+    fn test_widths_above_isize_max_behave_as_isize_max() {
+        let doc = call(4).append(Doc::line()).append(call(3)).group();
+        let expected = doc.render(isize::MAX as usize);
+        for width in [
+            isize::MAX as usize + 1,
+            usize::MAX / 2 + 2,
+            usize::MAX - 1,
+            usize::MAX,
+        ] {
+            assert_eq!(doc.render(width), expected, "width {width}");
+            let mut buf = String::new();
+            doc.render_into(width, &mut buf).unwrap();
+            assert_eq!(buf, expected);
+        }
+    }
+
+    #[test]
+    fn test_hardline_still_breaks_at_usize_max() {
+        // An unlimited width does not make a hardline fit.
+        let doc = Doc::text("a")
+            .append(Doc::line())
+            .append(Doc::text("b"))
+            .append(Doc::hardline())
+            .append(Doc::text("c"))
+            .group();
+        assert_eq!(doc.render(usize::MAX), "a\nb\nc");
+    }
+
+    #[test]
+    fn test_zero_width_groups_fit_at_width_zero() {
+        // Zero-width flat content fits in zero remaining columns.
+        assert_eq!(Doc::softline().group().render(0), "");
+        assert_eq!(Doc::text("").group().render(0), "");
+        // A `line` is one column flat, so it does not.
+        assert_eq!(Doc::line().group().render(0), "\n");
+        assert_eq!(Doc::line().group().render(1), " ");
+    }
+
+    #[test]
+    fn test_group_fit_counts_the_rest_of_the_line() {
+        // The group itself fits in 3 columns, but the text glued after it
+        // (before the next break) does not, so the group breaks.
+        let item = Doc::text("a").append(Doc::line()).append(Doc::text("b"));
+        let doc = item
+            .group()
+            .append(Doc::text("tail"))
+            .append(Doc::line())
+            .append(Doc::text("z"));
+        assert_eq!(doc.render(6), "a\nbtail\nz");
+        assert_eq!(doc.render(7), "a btail\nz");
+    }
+
+    #[test]
+    fn test_width_is_char_count_not_display_width() {
+        // Documented 1.x behaviour: widths are `chars().count()`. A CJK
+        // character (two terminal columns) and a combining mark (zero) each
+        // count as one.
+        let wide = Doc::text("日本")
+            .append(Doc::line())
+            .append(Doc::text("x"))
+            .group();
+        assert_eq!(wide.render(4), "日本 x");
+        let combining = Doc::text("e\u{301}")
+            .append(Doc::line())
+            .append(Doc::text("x"))
+            .group();
+        assert_eq!(combining.render(4), "e\u{301} x");
+        assert_eq!(combining.render(3), "e\u{301}\nx");
+        // An emoji (two cells) and a tab each count as one; the bytes do not
+        // matter.
+        let emoji_tab = Doc::text("\u{1F600}\t")
+            .append(Doc::line())
+            .append(Doc::text("x"))
+            .group();
+        assert_eq!(emoji_tab.render(4), "\u{1F600}\t x");
+        assert_eq!(emoji_tab.render(3), "\u{1F600}\t\nx");
     }
 
     #[test]
