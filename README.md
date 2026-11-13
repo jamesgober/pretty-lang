@@ -18,7 +18,7 @@
 
 <div align="left">
     <p>
-        pretty-lang is the TOOL-tier crate: language-agnostic AST/CST-to-source rendering — a <code>gofmt</code>-style formatter for any language, nearly free. Part of the -lang language-construction family; see _strategy/LANG_COLLECTION.md for the master plan.
+        pretty-lang is the TOOL-tier crate: language-agnostic AST/CST-to-source rendering — a <code>gofmt</code>-style formatter for any language, nearly free. Part of the -lang language-construction family.
     </p>
     <br>
     <hr>
